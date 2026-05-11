@@ -218,13 +218,13 @@ resolve_for_user() {
     return 1
   fi
 
-  # Мы используем маркер, чтобы игнорировать мусор из .bashrc/.zshrc пользователя
+  # Используем надежные маркеры для Astra Linux и MOTD
   local out
-  out=$(runuser -u "$target_user" -- bash -lc "printf 'RESOLVED_PATH='; command -v -- $(printf '%q' "$command_name")" 2>/dev/null || true)
-  if [[ "$out" == *"RESOLVED_PATH="* ]]; then
-    local path="${out#*RESOLVED_PATH=}"
-    # Очищаем от возможных остатков строк (берем первую строку после маркера)
-    path=$(echo "$path" | head -n 1 | tr -d '\r\n')
+  out=$(runuser -u "$target_user" -- bash -lc "printf 'START_RESOLVE\n'; command -v -- $(printf '%q' "$command_name") 2>/dev/null; printf 'END_RESOLVE\n'" 2>/dev/null || true)
+  
+  if [[ "$out" == *"START_RESOLVE"* ]]; then
+    local path
+    path=$(echo "$out" | sed -n '/START_RESOLVE/,/END_RESOLVE/p' | grep '^/' | head -n 1 | tr -d '\r\n[:space:]')
     if [[ -n "$path" ]]; then
       printf '%s\n' "$path"
       return 0
@@ -234,10 +234,11 @@ resolve_for_user() {
 }
 
 escape_env_value() {
-  # systemd EnvironmentFile accepts simple KEY=value lines. Keep values quoted.
   local value="$1"
   value="${value//\\/\\\\}"
   value="${value//\"/\\\"}"
+  # Удаляем переносы строк, так как они ломают EnvironmentFile
+  value="$(echo "$value" | tr -d '\r\n')"
   printf '"%s"' "$value"
 }
 
