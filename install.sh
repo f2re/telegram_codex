@@ -218,7 +218,19 @@ resolve_for_user() {
     return 1
   fi
 
-  runuser -u "$target_user" -- bash -lc "command -v -- $(printf '%q' "$command_name")" 2>/dev/null || return 1
+  # Мы используем маркер, чтобы игнорировать мусор из .bashrc/.zshrc пользователя
+  local out
+  out=$(runuser -u "$target_user" -- bash -lc "printf 'RESOLVED_PATH='; command -v -- $(printf '%q' "$command_name")" 2>/dev/null || true)
+  if [[ "$out" == *"RESOLVED_PATH="* ]]; then
+    local path="${out#*RESOLVED_PATH=}"
+    # Очищаем от возможных остатков строк (берем первую строку после маркера)
+    path=$(echo "$path" | head -n 1 | tr -d '\r\n')
+    if [[ -n "$path" ]]; then
+      printf '%s\n' "$path"
+      return 0
+    fi
+  fi
+  return 1
 }
 
 escape_env_value() {

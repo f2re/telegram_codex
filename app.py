@@ -396,11 +396,15 @@ class JobRunner:
         if "/" in executable:
             path = Path(executable)
             if not path.exists():
-                raise RuntimeError(f"Command does not exist: {executable}")
+                raise RuntimeError(f"Команда не найдена по пути: {executable}")
             return str(path)
         found = shutil.which(executable, path=self.cfg.service_path)
         if not found:
-            raise RuntimeError(f"Command not found in SERVICE_PATH: {executable}")
+            raise RuntimeError(
+                f"Исполняемый файл '{executable}' не найден в SERVICE_PATH.\n"
+                f"Проверьте настройки в файле конфигурации.\n"
+                f"Текущий PATH поиска: {self.cfg.service_path}"
+            )
         return found
 
     def command_env(self) -> dict[str, str]:
