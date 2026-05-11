@@ -91,9 +91,6 @@ class Config:
     codex_run_cmd: str
     codex_cmd: str
     gemini_cmd: str
-    gitlab_url: str
-    gitlab_token: str
-    gitlab_project_id: str
     service_path: str
     home: str
     telegram_poll_timeout: int
@@ -122,9 +119,6 @@ class Config:
             codex_run_cmd=os.environ.get("CODEX_RUN_CMD", "codex-run"),
             codex_cmd=os.environ.get("CODEX_CMD", "codex"),
             gemini_cmd=os.environ.get("GEMINI_CMD", "gemini"),
-            gitlab_url=os.environ.get("GITLAB_URL", "https://gitlab.com"),
-            gitlab_token=os.environ.get("GITLAB_TOKEN", ""),
-            gitlab_project_id=os.environ.get("GITLAB_PROJECT_ID", ""),
             service_path=os.environ.get("SERVICE_PATH", os.environ.get("PATH", "")),
             home=os.environ.get("HOME", str(Path.home())),
             telegram_poll_timeout=int(os.environ.get("TELEGRAM_POLL_TIMEOUT", "50")),
@@ -256,10 +250,7 @@ class Storage:
                 CREATE TABLE IF NOT EXISTS issue_drafts (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     job_id INTEGER NOT NULL,
-                    title TEXT NOT NULL,
-                    description TEXT NOT NULL,
-                    milestone TEXT,
-                    labels TEXT,
+                    draft_text TEXT NOT NULL,
                     confirmed INTEGER DEFAULT 0,
                     FOREIGN KEY(job_id) REFERENCES jobs(id)
                 )
@@ -267,11 +258,11 @@ class Storage:
             )
             conn.commit()
 
-    def create_issue_draft(self, job_id: int, title: str, description: str, milestone: Optional[str], labels: Optional[str]) -> None:
+    def create_issue_draft(self, job_id: int, draft_text: str) -> None:
         with self.lock, self.connect() as conn:
             conn.execute(
-                "INSERT INTO issue_drafts(job_id, title, description, milestone, labels) VALUES (?, ?, ?, ?, ?)",
-                (job_id, title, description, milestone, labels),
+                "INSERT INTO issue_drafts(job_id, draft_text) VALUES (?, ?)",
+                (job_id, draft_text),
             )
             conn.commit()
 
@@ -452,9 +443,10 @@ class JobRunner:
             ]
         if mode == "issue":
             prompt = (
-                "You are a requirements engineer. Create a GitLab issue draft from this task. "
-                "Output ONLY a JSON object with keys: title, description, milestone, labels (comma-separated). "
-                "The description should be professional and include requirements. "
+                "You are an expert system analyst. Your goal is to draft a GitLab issue for the task below. "
+                "You have GitLab MCP tools available; do NOT use them yet. Just create a clear Markdown draft "
+                "including a Title, Description, and any Labels or Milestones you'd suggest. "
+                "Make it professional and concise. "
                 f"Task: {task}"
             )
             return [
@@ -643,38 +635,25 @@ class JobRunner:
 
     def handle_issue_report(self, chat_id: int, job_id: int, output_file: Path) -> None:
         try:
-            content = output_file.read_text(encoding="utf-8").strip()
-            # Находим JSON в выводе (на случай, если Gemini добавил лишний текст)
-            match = re.search(r"(\{.*\})", content, re.DOTALL)
-            if not match:
-                raise ValueError("JSON не найден в ответе Gemini")
-            
-            data = json.loads(match.group(1))
-            title = data.get("title", "Без названия")
-            description = data.get("description", "")
-            milestone = data.get("milestone")
-            labels = data.get("labels")
-
-            self.storage.create_issue_draft(job_id, title, description, milestone, labels)
+            draft_text = output_file.read_text(encoding="utf-8").strip()
+            self.storage.create_issue_draft(job_id, draft_text)
 
             msg = (
-                f"📋 **Черновик Issue для GitLab**\n\n"
-                f"📌 **Заголовок:** {title}\n"
-                f"🚩 **Милестоун:** {milestone or '-'}\n"
-                f"🏷 **Метки:** {labels or '-'}\n\n"
-                f"📝 **Описание:**\n{description}"
+                f"📋 **Черновик Issue для GitLab (MCP)**\n\n"
+                f"{draft_text}\n\n"
+                f"❓ Создать этот тикет в GitLab, используя MCP инструменты?"
             )
             
             keyboard = {
                 "inline_keyboard": [[
-                    {"text": "✅ Создать Issue", "callback_data": f"issue_confirm:{job_id}"},
+                    {"text": "✅ Создать через MCP", "callback_data": f"issue_confirm:{job_id}"},
                     {"text": "❌ Отмена", "callback_data": f"issue_cancel:{job_id}"}
                 ]]
             }
             self.tg.send_message(chat_id, msg, reply_markup=keyboard)
 
         except Exception as exc:
-            self.tg.send_message(chat_id, f"⚠️ Ошибка разбора черновика Issue: {exc}\n\nРезультат Gemini:\n{output_file.read_text()[:500]}")
+            self.tg.send_message(chat_id, f"⚠️ Ошибка подготовки черновика: {exc}")
 
     def create_gitlab_issue(self, chat_id: int, job_id: int) -> None:
         draft = self.storage.get_issue_draft(job_id)
@@ -682,31 +661,20 @@ class JobRunner:
             self.tg.send_message(chat_id, "❌ Черновик не найден.")
             return
 
-        if not self.cfg.gitlab_token or not self.cfg.gitlab_project_id:
-            self.tg.send_message(chat_id, "❌ Настройки GitLab не заданы (GITLAB_TOKEN / GITLAB_PROJECT_ID).")
-            return
-
-        url = f"{self.cfg.gitlab_url.rstrip('/')}/api/v4/projects/{self.cfg.gitlab_project_id}/issues"
-        headers = {"PRIVATE-TOKEN": self.cfg.gitlab_token}
-        payload = {
-            "title": draft["title"],
-            "description": draft["description"],
-        }
-        if draft["milestone"]:
-            # В реальном API нужно сначала найти ID милестоуна по имени, но для простоты опустим или передадим как есть
-            # GitLab API для issues принимает milestone_id (инт)
-            pass 
-        if draft["labels"]:
-            payload["labels"] = draft["labels"]
-
+        # Для создания мы запускаем новую задачу через Codex, который умеет пользоваться MCP GitLab
+        prompt = (
+            "Using your GitLab MCP tools, create a new issue exactly as described in this draft. "
+            "Report the final issue URL. "
+            f"Draft:\n{draft['draft_text']}"
+        )
+        
         try:
-            response = requests.post(url, headers=headers, json=payload, timeout=self.cfg.http_timeout)
-            response.raise_for_status()
-            data = response.json()
-            issue_url = data.get("web_url")
-            self.tg.send_message(chat_id, f"✅ **Issue успешно создан!**\n🔗 [Открыть в GitLab]({issue_url})")
+            # Мы ставим задачу в очередь бота как новый Job режима 'codex' (чтобы были видны логи и процесс)
+            # Но для пользователя это выглядит как продолжение
+            new_job_id = self.runner.enqueue("codex", prompt, 0, chat_id) # 0 as system/bot user id
+            self.tg.send_message(chat_id, f"⚙️ **Запущено создание Issue (MCP)...** (Задача #{new_job_id})")
         except Exception as exc:
-            self.tg.send_message(chat_id, f"💥 Ошибка создания Issue в GitLab: {exc}")
+            self.tg.send_message(chat_id, f"💥 Не удалось запустить процесс создания: {exc}")
 
 
 class BotApp:

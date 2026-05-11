@@ -62,7 +62,7 @@ KNOWN_SETTINGS=(
   PROJECT_DIR CREATE_PROJECT_DIR INSTALL_NODEJS NODE_MAJOR INSTALL_CODEX_CLI
   CODEX_NPM_PACKAGE INSTALL_GEMINI_CLI GEMINI_NPM_PACKAGE CREATE_CODEX_WRAPPERS
   INSTALL_DIR DATA_DIR ENV_FILE SERVICE_FILE START_SERVICE CODEX_PLAN_CMD
-  CODEX_RUN_CMD CODEX_CMD GEMINI_CMD GITLAB_URL GITLAB_TOKEN GITLAB_PROJECT_ID
+  CODEX_RUN_CMD CODEX_CMD GEMINI_CMD
 )
 
 is_known_setting() {
@@ -448,9 +448,6 @@ main() {
   prompt TELEGRAM_ALLOWED_USERS "Allowed Telegram user IDs, comma-separated" ""
   prompt PROJECT_DIR "Workspace/project directory for AI CLIs" "$DEFAULT_PROJECT_DIR"
   prompt_yes_no CREATE_PROJECT_DIR "Create workspace directory if missing" "yes"
-  prompt GITLAB_URL "GitLab URL" "https://gitlab.com"
-  prompt_secret GITLAB_TOKEN "GitLab Private Token"
-  prompt GITLAB_PROJECT_ID "GitLab Project ID (path or numeric)" ""
 
   section "2. CLI и зависимости"
   prompt_yes_no INSTALL_NODEJS "Install Node.js/npm if missing" "yes"
@@ -552,9 +549,6 @@ CODEX_PLAN_CMD=$(escape_env_value "$CODEX_PLAN_CMD")
 CODEX_RUN_CMD=$(escape_env_value "$CODEX_RUN_CMD")
 CODEX_CMD=$(escape_env_value "$CODEX_CMD")
 GEMINI_CMD=$(escape_env_value "$GEMINI_CMD")
-GITLAB_URL=$(escape_env_value "$GITLAB_URL")
-GITLAB_TOKEN=$(escape_env_value "$GITLAB_TOKEN")
-GITLAB_PROJECT_ID=$(escape_env_value "$GITLAB_PROJECT_ID")
 HOME=$(escape_env_value "$target_home")
 SERVICE_PATH=$(escape_env_value "$service_path")
 TELEGRAM_POLL_TIMEOUT=50
