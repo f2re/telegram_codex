@@ -384,7 +384,7 @@ out_file="$out_dir/run-$stamp.md"
 codex exec \
   --cd "$project_dir" \
   --skip-git-repo-check \
-  --dangerously-bypass-approvals-and-sandbox \
+  --sandbox none \
   --output-last-message "$out_file" \
   "$task"
 

@@ -32,7 +32,7 @@ codex-telegram-bot
     +-- /plan   -> codex-plan wrapper, read-only Codex
     +-- /run    -> codex-run wrapper, Codex bypass mode
     +-- /gemini -> gemini --skip-trust --yolo --prompt
-    +-- /codex  -> codex exec --dangerously-bypass-approvals-and-sandbox
+    +-- /codex  -> codex exec --sandbox none
     |
     v
 PROJECT_DIR / repo / tools / tests / commits
@@ -184,7 +184,7 @@ sqlite3 /var/lib/codex-telegram-bot/bot.sqlite3 \
 Бот намеренно даёт Telegram-командам доступ к локальным AI CLI:
 
 - `/gemini` запускает Gemini CLI с `--yolo`;
-- `/codex` запускает Codex CLI с `--dangerously-bypass-approvals-and-sandbox`;
+- `/codex` запускает Codex CLI с `--sandbox none`;
 - `/run` через wrapper тоже запускает Codex в bypass-режиме.
 
 Практические правила:
