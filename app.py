@@ -185,6 +185,7 @@ class TelegramClient:
                 "chat_id": chat_id,
                 "text": chunk,
                 "disable_web_page_preview": True,
+                "parse_mode": "Markdown",
             }
             if reply_markup and idx + TELEGRAM_MESSAGE_LIMIT >= len(text):
                 payload["reply_markup"] = reply_markup

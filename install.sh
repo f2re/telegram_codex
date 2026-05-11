@@ -351,7 +351,7 @@ codex exec \
   --skip-git-repo-check \
   --sandbox read-only \
   --output-last-message "$out_file" \
-  "$task"
+  "Please provide a detailed and comprehensive analysis for the following task. Do not be brief: $task"
 
 printf '%s\n' "$out_file"
 EOF
