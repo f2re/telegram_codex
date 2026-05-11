@@ -14,6 +14,7 @@ configured commands as external processes.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import queue
 import re
@@ -32,7 +33,24 @@ from typing import Any, Optional
 
 import requests
 
+# Configure logging to stdout for systemd/journalctl
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+    stream=sys.stdout,
+)
+logger = logging.getLogger("bot")
+
 TELEGRAM_MESSAGE_LIMIT = 3900
+
+
+def mask_token(token: str) -> str:
+    """Mask Telegram token for safe logging."""
+    if ":" in token:
+        prefix, suffix = token.split(":", 1)
+        return f"{prefix}:{'*' * (len(suffix) - 4)}{suffix[-4:]}"
+    return "****"
 
 
 def utc_now() -> str:
@@ -150,21 +168,34 @@ class TelegramClient:
     ) -> dict[str, Any]:
         """Call Telegram Bot API method."""
         url = f"{self.cfg.telegram_api_base}/{method}"
+        masked_url = f"https://api.telegram.org/bot{mask_token(self.cfg.telegram_bot_token)}/{method}"
+        
+        # Don't log full getUpdates payload to keep logs clean
+        log_payload = {k: v for k, v in payload.items() if k != "offset"} if method == "getUpdates" else payload
+        logger.debug("Telegram API Request: %s %s", method, log_payload)
+
         try:
             if files:
                 response = self.session.post(url, data=payload, files=files, timeout=self.cfg.http_timeout)
             else:
                 response = self.session.post(url, json=payload, timeout=self.cfg.http_timeout)
         except requests.RequestException as exc:
+            logger.error("Telegram request failed: %s %s", masked_url, exc)
             raise RuntimeError(f"Telegram request failed: {exc}") from exc
 
         try:
             data = response.json()
         except json.JSONDecodeError as exc:
+            logger.error("Telegram returned non-JSON HTTP %d: %s", response.status_code, response.text)
             raise RuntimeError(f"Telegram returned non-JSON HTTP {response.status_code}") from exc
 
         if not data.get("ok"):
+            logger.error("Telegram API error: %s", data)
             raise RuntimeError(f"Telegram API error: {data}")
+        
+        if method != "getUpdates" or data.get("result"):
+             logger.debug("Telegram API Response: %s", data)
+             
         return data
 
     def get_updates(self, offset: Optional[int]) -> list[dict[str, Any]]:
@@ -189,7 +220,20 @@ class TelegramClient:
             }
             if reply_markup and idx + TELEGRAM_MESSAGE_LIMIT >= len(text):
                 payload["reply_markup"] = reply_markup
-            self.call("sendMessage", payload)
+
+            try:
+                self.call("sendMessage", payload)
+            except RuntimeError as exc:
+                if "can't parse entities" in str(exc).lower() or "bad request" in str(exc).lower():
+                    # Fallback to plain text if Markdown is broken
+                    payload.pop("parse_mode", None)
+                    # Also escape any unintentional Markdown-like characters is not needed in plain text
+                    # but we might want to tell the user it was a fallback
+                    if idx == 0:
+                        payload["text"] = "⚠️ [Markdown Fallback]\n" + chunk
+                    self.call("sendMessage", payload)
+                else:
+                    raise
 
     def answer_callback_query(self, callback_query_id: str, text: Optional[str] = None) -> None:
         payload = {"callback_query_id": callback_query_id}
@@ -348,9 +392,12 @@ class JobRunner:
             raise ValueError("mode must be one of: plan, run, gemini, codex, issue, stats")
 
         if self.storage.active_job() is not None:
+            logger.warning("Enqueue failed: active job exists (User %d, Mode %s)", user_id, mode)
             raise RuntimeError("There is already an active job. Use /status or /cancel.")
+        
         log_file = self.cfg.logs_dir / f"{mode}-{int(time.time())}.log"
         job_id = self.storage.create_job(mode, task, user_id, chat_id, log_file)
+        logger.info("Job #%d enqueued (User %d, Mode %s)", job_id, user_id, mode)
         self.jobs.put(job_id)
         return job_id
 
@@ -360,7 +407,9 @@ class JobRunner:
                 return False
             self.cancel_requested_for = self.current_job_id
             proc = self.current_proc
+            job_id = self.current_job_id
 
+        logger.info("Cancellation requested for Job #%d", job_id)
         if proc and proc.poll() is None:
             try:
                 os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
@@ -374,15 +423,18 @@ class JobRunner:
     def worker_loop(self) -> None:
         while True:
             job_id = self.jobs.get()
+            logger.info("Worker picked Job #%d", job_id)
             try:
                 self.run_job(job_id)
             except Exception as exc:  # noqa: BLE001 - final safety net for daemon worker
+                logger.exception("Critical error in Job #%d:", job_id)
                 row = self.storage.get_job(job_id)
                 chat_id = int(row["chat_id"]) if row else 0
                 self.storage.update_job(job_id, status="failed", finished_at=utc_now(), error=str(exc))
                 if chat_id:
-                    self.tg.send_message(chat_id, f"💥 Задача #{job_id} завершилась с критической ошибкой:\n\n`{exc}`")
+                    self.tg.send_message(chat_id, f"💥 Задача #{job_id} завершилась с критической ошибкой:\n\n```\n{exc}\n```")
             finally:
+                logger.info("Worker finished Job #%d", job_id)
                 self.jobs.task_done()
 
     def split_configured_command(self, command: str) -> list[str]:
@@ -503,6 +555,7 @@ class JobRunner:
     def run_job(self, job_id: int) -> None:
         row = self.storage.get_job(job_id)
         if row is None:
+            logger.error("Job #%d not found in database", job_id)
             return
 
         mode = str(row["mode"])
@@ -512,6 +565,9 @@ class JobRunner:
         output_file = self.default_output_file(mode, job_id)
         argv = self.build_command(mode, task, output_file)
         display_command = " ".join(shlex.quote(part) for part in argv[:-1]) + " <task>"
+
+        logger.info("Starting Job #%d (Mode: %s)", job_id, mode)
+        logger.debug("Command for Job #%d: %s", job_id, " ".join(shlex.quote(p) for p in argv))
 
         self.storage.update_job(job_id, status="running", started_at=utc_now())
         self.tg.send_message(
@@ -573,6 +629,7 @@ class JobRunner:
 
                     if should_cancel:
                         cancelled = True
+                        logger.warning("Terminating Job #%d process (PID %d)", job_id, proc.pid)
                         try:
                             os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
                         except OSError:
@@ -584,6 +641,7 @@ class JobRunner:
                             time.sleep(0.5)
 
                         if proc.poll() is None:
+                            logger.error("Force killing Job #%d process (PID %d)", job_id, proc.pid)
                             try:
                                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
                             except OSError:
@@ -608,10 +666,24 @@ class JobRunner:
             )
 
         if mode in {"gemini", "stats", "issue"} and output_chunks:
-            output_file.write_bytes(b"".join(output_chunks))
+            full_output = b"".join(output_chunks)
+            output_file.write_bytes(full_output)
+            try:
+                decoded_output = full_output.decode("utf-8", errors="replace")
+                logger.info("Job #%d output captured:\n%s", job_id, decoded_output.strip())
+            except Exception:
+                logger.info("Job #%d output captured (binary or undecodable)", job_id)
+
         if not output_file.exists():
             output_file = self.find_output_file(mode, log_file, started_ts)
+        
         status = "cancelled" if cancelled else "success" if return_code == 0 else "failed"
+        logger.info("Job #%d finished with status: %s (RC: %s)", job_id, status, return_code)
+
+        if output_file and output_file.exists():
+            logger.info("Job #%d result file: %s", job_id, output_file)
+        elif status != "cancelled":
+            logger.warning("Job #%d finished but no output file found", job_id)
 
         self.storage.update_job(
             job_id,
@@ -657,11 +729,13 @@ class JobRunner:
         
         if output_file and output_file.exists():
             result = read_text_limited(output_file, max_chars=12_000)
+            logger.info("Job #%d reporting success. Result snippet:\n%s", job_id, result[:1000] + "..." if len(result) > 1000 else result)
             self.tg.send_message(chat_id, f"{header}\n\n📝 **Результат:**\n\n{result}")
             self.tg.send_document(chat_id, output_file, caption=f"📄 Результат задачи #{job_id}")
             return
 
         log_tail = read_text_limited(log_file, max_chars=12_000)
+        logger.warning("Job #%d reporting failure/no-output. Log tail:\n%s", job_id, log_tail[:1000] + "..." if len(log_tail) > 1000 else log_tail)
         self.tg.send_message(chat_id, f"{header}\n\n⚠️ Файл результата не найден. Последние строки лога:\n\n{log_tail}")
         self.tg.send_document(chat_id, log_file, caption=f"📜 Лог задачи #{job_id}")
 
@@ -724,7 +798,7 @@ class BotApp:
         signal.signal(signal.SIGINT, self.handle_signal)
 
     def handle_signal(self, signum: int, _frame: object) -> None:
-        print(f"received signal {signum}, stopping", flush=True)
+        logger.info("Received signal %d, stopping bot", signum)
         self.stop_event.set()
         self.runner.request_cancel()
 
@@ -732,7 +806,7 @@ class BotApp:
         return user_id in self.cfg.telegram_allowed_users
 
     def run(self) -> None:
-        print("codex-telegram-bot started", flush=True)
+        logger.info("codex-telegram-bot started")
         while not self.stop_event.is_set():
             try:
                 updates = self.tg.get_updates(self.offset)
@@ -740,7 +814,7 @@ class BotApp:
                     self.offset = int(update["update_id"]) + 1
                     self.handle_update(update)
             except Exception as exc:  # noqa: BLE001 - keep daemon alive
-                print(f"polling error: {exc}", file=sys.stderr, flush=True)
+                logger.error("Polling error: %s", exc)
                 time.sleep(5)
 
     def handle_update(self, update: dict[str, Any]) -> None:
@@ -757,14 +831,18 @@ class BotApp:
 
         chat_id = int(chat.get("id"))
         user_id = int(user.get("id"))
+        username = user.get("username", "unknown")
 
         if not self.is_allowed(user_id):
+            logger.warning("Access denied for User %d (@%s) in Chat %d", user_id, username, chat_id)
             self.tg.send_message(chat_id, "⛔️ **Доступ запрещен.** Ваш ID не в белом списке.")
             return
 
+        logger.info("Incoming message from User %d (@%s): %s", user_id, username, text[:50] + "..." if len(text) > 50 else text)
         try:
             self.handle_text(chat_id, user_id, text)
         except Exception as exc:  # noqa: BLE001 - report command errors to chat
+            logger.exception("Error handling command from User %d:", user_id)
             self.tg.send_message(chat_id, f"⚠️ **Ошибка выполнения команды:**\n\n`{exc}`")
 
     def handle_callback(self, query: dict[str, Any]) -> None:
