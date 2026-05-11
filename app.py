@@ -462,16 +462,16 @@ class JobRunner:
             ]
         if mode == "stats":
             # Собираем детальную статистику по лимитам
-            gemini_bin = self.resolve_executable(self.cfg.gemini_cmd)
-            codex_bin = self.resolve_executable(self.cfg.codex_cmd)
+            gemini_parts = self.split_configured_command(self.cfg.gemini_cmd)
+            codex_parts = self.split_configured_command(self.cfg.codex_cmd)
             
             # Скрипт запрашивает статус у обоих CLI
             # Для Gemini используем скрытую команду /stats через prompt
             script = (
                 f"echo '♊️ **Gemini Quota & Usage:**'; "
-                f"{shlex.quote(gemini_bin)} --prompt '/stats model' --output-format json 2>&1 || echo '❌ Не удалось получить JSON от Gemini'; "
+                f"{shlex.quote(gemini_parts[0])} --prompt '/stats model' --output-format json 2>&1 || echo '❌ Не удалось получить JSON от Gemini'; "
                 f"echo; echo '💻 **Codex Status:**'; "
-                f"{shlex.quote(codex_bin)} status 2>&1 || echo '❌ Не удалось получить статус Codex'"
+                f"{shlex.quote(codex_parts[0])} status 2>&1 || echo '❌ Не удалось получить статус Codex'"
             )
             return ["bash", "-c", script]
         raise RuntimeError(f"Unsupported mode: {mode}")
@@ -803,8 +803,6 @@ class BotApp:
             self.cmd_job(chat_id, user_id, "codex", argument)
         elif command == "/issue":
             self.cmd_job(chat_id, user_id, "issue", argument)
-        elif command == "/stats":
-            self.cmd_job(chat_id, user_id, "stats", argument or "model")
         elif command == "/status":
             self.cmd_status(chat_id)
         elif command == "/jobs":
