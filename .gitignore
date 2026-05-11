@@ -2,6 +2,8 @@ __pycache__/
 *.py[cod]
 *.sqlite3
 .env
+.install-state.env
+.install-state.env.tmp
 .venv/
 venv/
 dist/
