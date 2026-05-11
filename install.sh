@@ -494,9 +494,9 @@ main() {
   chown -R "$TARGET_USER:$target_group" "$INSTALL_DIR" "$DATA_DIR"
 
   info "Creating Python virtual environment"
-  runuser -u "$TARGET_USER" -- python3 -m venv "$INSTALL_DIR/venv"
-  runuser -u "$TARGET_USER" -- "$INSTALL_DIR/venv/bin/pip" install --upgrade pip
-  runuser -u "$TARGET_USER" -- "$INSTALL_DIR/venv/bin/pip" install -r "$INSTALL_DIR/requirements.txt"
+  runuser -u "$TARGET_USER" -- python3 -m venv "$INSTALL_DIR/venv" || warn "Failed to create venv"
+  runuser -u "$TARGET_USER" -- "$INSTALL_DIR/venv/bin/pip" install --upgrade pip || warn "Failed to upgrade pip"
+  runuser -u "$TARGET_USER" -- "$INSTALL_DIR/venv/bin/pip" install -r "$INSTALL_DIR/requirements.txt" || warn "Failed to install Python requirements, continuing..."
 
   if [[ "$CREATE_CODEX_WRAPPERS" == "yes" ]]; then
     info "Creating codex-plan/codex-run fallback wrappers"
