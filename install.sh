@@ -242,13 +242,13 @@ decode_env_value() {
 install_os_packages() {
   info "Installing OS packages"
   if command_exists apt-get; then
-    apt-get update
+    apt-get update || warn "apt-get update failed"
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
-      bash ca-certificates curl git gnupg python3 python3-pip python3-venv rsync sqlite3
+      bash ca-certificates curl git gnupg python3 python3-pip python3-venv rsync sqlite3 || warn "apt-get install failed, continuing..."
   elif command_exists dnf; then
-    dnf install -y bash ca-certificates curl git gnupg2 python3 python3-pip rsync sqlite sqlite-devel
+    dnf install -y bash ca-certificates curl git gnupg2 python3 python3-pip rsync sqlite sqlite-devel || warn "dnf install failed, continuing..."
   elif command_exists yum; then
-    yum install -y bash ca-certificates curl git gnupg2 python3 python3-pip rsync sqlite
+    yum install -y bash ca-certificates curl git gnupg2 python3 python3-pip rsync sqlite || warn "yum install failed, continuing..."
   else
     fail "Unsupported package manager. Install bash, curl, git, python3, python3-venv, pip, rsync and sqlite3 manually."
   fi
@@ -268,15 +268,15 @@ install_nodejs_if_requested() {
   if command_exists apt-get; then
     local setup_script="/tmp/nodesource_setup_${NODE_MAJOR}.x"
     curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" -o "$setup_script"
-    bash "$setup_script"
-    DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs
+    bash "$setup_script" || warn "NodeSource setup script failed"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs || warn "apt-get install nodejs failed, continuing..."
     rm -f "$setup_script"
   elif command_exists dnf; then
     dnf module reset -y nodejs || true
     dnf module enable -y "nodejs:${NODE_MAJOR}" || true
-    dnf install -y nodejs npm
+    dnf install -y nodejs npm || warn "dnf install nodejs failed, continuing..."
   elif command_exists yum; then
-    yum install -y nodejs npm
+    yum install -y nodejs npm || warn "yum install nodejs failed, continuing..."
   else
     fail "Cannot install Node.js automatically on this system."
   fi
@@ -300,7 +300,7 @@ install_npm_cli_if_requested() {
   fi
 
   info "Installing $package_name globally with npm"
-  npm install -g "$package_name"
+  npm install -g "$package_name" || warn "npm install -g $package_name failed, continuing..."
 }
 
 make_project_dir() {
