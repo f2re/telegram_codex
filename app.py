@@ -91,6 +91,9 @@ class Config:
     codex_run_cmd: str
     codex_cmd: str
     gemini_cmd: str
+    gitlab_url: str
+    gitlab_token: str
+    gitlab_project_id: str
     service_path: str
     home: str
     telegram_poll_timeout: int
@@ -119,6 +122,9 @@ class Config:
             codex_run_cmd=os.environ.get("CODEX_RUN_CMD", "codex-run"),
             codex_cmd=os.environ.get("CODEX_CMD", "codex"),
             gemini_cmd=os.environ.get("GEMINI_CMD", "gemini"),
+            gitlab_url=os.environ.get("GITLAB_URL", "https://gitlab.com"),
+            gitlab_token=os.environ.get("GITLAB_TOKEN", ""),
+            gitlab_project_id=os.environ.get("GITLAB_PROJECT_ID", ""),
             service_path=os.environ.get("SERVICE_PATH", os.environ.get("PATH", "")),
             home=os.environ.get("HOME", str(Path.home())),
             telegram_poll_timeout=int(os.environ.get("TELEGRAM_POLL_TIMEOUT", "50")),
@@ -176,19 +182,25 @@ class TelegramClient:
             payload["offset"] = offset
         return self.call("getUpdates", payload).get("result", [])
 
-    def send_message(self, chat_id: int, text: str) -> None:
+    def send_message(self, chat_id: int, text: str, reply_markup: Optional[dict[str, Any]] = None) -> None:
         if not text:
             text = "📭 Пустой ответ."
         for idx in range(0, len(text), TELEGRAM_MESSAGE_LIMIT):
             chunk = text[idx : idx + TELEGRAM_MESSAGE_LIMIT]
-            self.call(
-                "sendMessage",
-                {
-                    "chat_id": chat_id,
-                    "text": chunk,
-                    "disable_web_page_preview": True,
-                },
-            )
+            payload = {
+                "chat_id": chat_id,
+                "text": chunk,
+                "disable_web_page_preview": True,
+            }
+            if reply_markup and idx + TELEGRAM_MESSAGE_LIMIT >= len(text):
+                payload["reply_markup"] = reply_markup
+            self.call("sendMessage", payload)
+
+    def answer_callback_query(self, callback_query_id: str, text: Optional[str] = None) -> None:
+        payload = {"callback_query_id": callback_query_id}
+        if text:
+            payload["text"] = text
+        self.call("answerCallbackQuery", payload)
 
     def send_document(self, chat_id: int, path: Path, caption: str = "") -> None:
         if not path.exists():
@@ -238,7 +250,34 @@ class Storage:
             )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs(created_at)")
+
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS issue_drafts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id INTEGER NOT NULL,
+                    title TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    milestone TEXT,
+                    labels TEXT,
+                    confirmed INTEGER DEFAULT 0,
+                    FOREIGN KEY(job_id) REFERENCES jobs(id)
+                )
+                """
+            )
             conn.commit()
+
+    def create_issue_draft(self, job_id: int, title: str, description: str, milestone: Optional[str], labels: Optional[str]) -> None:
+        with self.lock, self.connect() as conn:
+            conn.execute(
+                "INSERT INTO issue_drafts(job_id, title, description, milestone, labels) VALUES (?, ?, ?, ?, ?)",
+                (job_id, title, description, milestone, labels),
+            )
+            conn.commit()
+
+    def get_issue_draft(self, job_id: int) -> Optional[sqlite3.Row]:
+        with self.lock, self.connect() as conn:
+            return conn.execute("SELECT * FROM issue_drafts WHERE job_id=?", (job_id,)).fetchone()
 
     def create_job(self, mode: str, task: str, user_id: int, chat_id: int, log_file: Path) -> int:
         with self.lock, self.connect() as conn:
@@ -313,8 +352,8 @@ class JobRunner:
         self.worker.start()
 
     def enqueue(self, mode: str, task: str, user_id: int, chat_id: int) -> int:
-        if mode not in {"plan", "run", "gemini", "codex"}:
-            raise ValueError("mode must be one of: plan, run, gemini, codex")
+        if mode not in {"plan", "run", "gemini", "codex", "issue"}:
+            raise ValueError("mode must be one of: plan, run, gemini, codex, issue")
         if self.storage.active_job() is not None:
             raise RuntimeError("There is already an active job. Use /status or /cancel.")
         log_file = self.cfg.logs_dir / f"{mode}-{int(time.time())}.log"
@@ -409,6 +448,22 @@ class JobRunner:
                 "--output-last-message",
                 str(output_file),
                 task,
+            ]
+        if mode == "issue":
+            prompt = (
+                "You are a requirements engineer. Create a GitLab issue draft from this task. "
+                "Output ONLY a JSON object with keys: title, description, milestone, labels (comma-separated). "
+                "The description should be professional and include requirements. "
+                f"Task: {task}"
+            )
+            return [
+                *self.split_configured_command(self.cfg.gemini_cmd),
+                "--skip-trust",
+                "--yolo",
+                "--prompt",
+                prompt,
+                "--output-format",
+                "text",
             ]
         raise RuntimeError(f"Unsupported mode: {mode}")
 
@@ -563,6 +618,13 @@ class JobRunner:
         output_file: Optional[Path],
         log_file: Path,
     ) -> None:
+        row = self.storage.get_job(job_id)
+        mode = row["mode"] if row else "unknown"
+
+        if mode == "issue" and status == "success" and output_file and output_file.exists():
+            self.handle_issue_report(chat_id, job_id, output_file)
+            return
+
         status_icon = "✅" if status == "success" else "❌" if status == "failed" else "🚫"
         status_text = "Успешно" if status == "success" else "Ошибка" if status == "failed" else "Отменено"
         
@@ -577,6 +639,73 @@ class JobRunner:
         log_tail = read_text_limited(log_file, max_chars=12_000)
         self.tg.send_message(chat_id, f"{header}\n\n⚠️ Файл результата не найден. Последние строки лога:\n\n{log_tail}")
         self.tg.send_document(chat_id, log_file, caption=f"📜 Лог задачи #{job_id}")
+
+    def handle_issue_report(self, chat_id: int, job_id: int, output_file: Path) -> None:
+        try:
+            content = output_file.read_text(encoding="utf-8").strip()
+            # Находим JSON в выводе (на случай, если Gemini добавил лишний текст)
+            match = re.search(r"(\{.*\})", content, re.DOTALL)
+            if not match:
+                raise ValueError("JSON не найден в ответе Gemini")
+            
+            data = json.loads(match.group(1))
+            title = data.get("title", "Без названия")
+            description = data.get("description", "")
+            milestone = data.get("milestone")
+            labels = data.get("labels")
+
+            self.storage.create_issue_draft(job_id, title, description, milestone, labels)
+
+            msg = (
+                f"📋 **Черновик Issue для GitLab**\n\n"
+                f"📌 **Заголовок:** {title}\n"
+                f"🚩 **Милестоун:** {milestone or '-'}\n"
+                f"🏷 **Метки:** {labels or '-'}\n\n"
+                f"📝 **Описание:**\n{description}"
+            )
+            
+            keyboard = {
+                "inline_keyboard": [[
+                    {"text": "✅ Создать Issue", "callback_data": f"issue_confirm:{job_id}"},
+                    {"text": "❌ Отмена", "callback_data": f"issue_cancel:{job_id}"}
+                ]]
+            }
+            self.tg.send_message(chat_id, msg, reply_markup=keyboard)
+
+        except Exception as exc:
+            self.tg.send_message(chat_id, f"⚠️ Ошибка разбора черновика Issue: {exc}\n\nРезультат Gemini:\n{output_file.read_text()[:500]}")
+
+    def create_gitlab_issue(self, chat_id: int, job_id: int) -> None:
+        draft = self.storage.get_issue_draft(job_id)
+        if not draft:
+            self.tg.send_message(chat_id, "❌ Черновик не найден.")
+            return
+
+        if not self.cfg.gitlab_token or not self.cfg.gitlab_project_id:
+            self.tg.send_message(chat_id, "❌ Настройки GitLab не заданы (GITLAB_TOKEN / GITLAB_PROJECT_ID).")
+            return
+
+        url = f"{self.cfg.gitlab_url.rstrip('/')}/api/v4/projects/{self.cfg.gitlab_project_id}/issues"
+        headers = {"PRIVATE-TOKEN": self.cfg.gitlab_token}
+        payload = {
+            "title": draft["title"],
+            "description": draft["description"],
+        }
+        if draft["milestone"]:
+            # В реальном API нужно сначала найти ID милестоуна по имени, но для простоты опустим или передадим как есть
+            # GitLab API для issues принимает milestone_id (инт)
+            pass 
+        if draft["labels"]:
+            payload["labels"] = draft["labels"]
+
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=self.cfg.http_timeout)
+            response.raise_for_status()
+            data = response.json()
+            issue_url = data.get("web_url")
+            self.tg.send_message(chat_id, f"✅ **Issue успешно создан!**\n🔗 [Открыть в GitLab]({issue_url})")
+        except Exception as exc:
+            self.tg.send_message(chat_id, f"💥 Ошибка создания Issue в GitLab: {exc}")
 
 
 class BotApp:
@@ -614,6 +743,10 @@ class BotApp:
                 time.sleep(5)
 
     def handle_update(self, update: dict[str, Any]) -> None:
+        if "callback_query" in update:
+            self.handle_callback(update["callback_query"])
+            return
+
         message = update.get("message") or {}
         chat = message.get("chat") or {}
         user = message.get("from") or {}
@@ -632,6 +765,23 @@ class BotApp:
             self.handle_text(chat_id, user_id, text)
         except Exception as exc:  # noqa: BLE001 - report command errors to chat
             self.tg.send_message(chat_id, f"⚠️ **Ошибка выполнения команды:**\n\n`{exc}`")
+
+    def handle_callback(self, query: dict[str, Any]) -> None:
+        chat_id = query["message"]["chat"]["id"]
+        user_id = query["from"]["id"]
+        data = query.get("data", "")
+
+        if not self.is_allowed(user_id):
+            self.tg.answer_callback_query(query["id"], "Доступ запрещен")
+            return
+
+        if data.startswith("issue_confirm:"):
+            job_id = int(data.split(":")[1])
+            self.tg.answer_callback_query(query["id"], "Создаю Issue...")
+            self.create_gitlab_issue(chat_id, job_id)
+        elif data.startswith("issue_cancel:"):
+            self.tg.answer_callback_query(query["id"], "Отменено")
+            self.tg.send_message(chat_id, "🚫 Создание Issue отменено.")
 
     @staticmethod
     def parse_command(text: str) -> tuple[str, str]:
@@ -654,6 +804,8 @@ class BotApp:
             self.cmd_job(chat_id, user_id, "gemini", argument)
         elif command == "/codex":
             self.cmd_job(chat_id, user_id, "codex", argument)
+        elif command == "/issue":
+            self.cmd_job(chat_id, user_id, "issue", argument)
         elif command == "/status":
             self.cmd_status(chat_id)
         elif command == "/jobs":
@@ -674,7 +826,8 @@ class BotApp:
             "🔍 /plan <задача> — Анализ и планирование (только чтение)\n"
             "🛠 /run <задача> — Выполнение и модификация кода (YOLO)\n"
             "♊️ /gemini <задача> — Запуск Gemini CLI (YOLO)\n"
-            "💻 /codex <задача> — Запуск Codex CLI (без песочницы)\n\n"
+            "💻 /codex <задача> — Запуск Codex CLI (без песочницы)\n"
+            "🎫 /issue <задание> — Создать Issue в GitLab (с подтверждением)\n\n"
             "📊 **Статус:**\n"
             "🕒 /status — Состояние текущей задачи\n"
             "📜 /jobs — Последние 10 задач\n"
