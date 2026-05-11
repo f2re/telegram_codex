@@ -323,6 +323,15 @@ write_codex_wrappers() {
 
   cat > "$wrapper_dir/codex-plan" <<'EOF'
 #!/usr/bin/env bash
+
+# Инициализация NVM, если он установлен
+if [ -s "$HOME/.nvm/nvm.sh" ]; then
+  export NVM_DIR="$HOME/.nvm"
+  set +u 2>/dev/null
+  . "$NVM_DIR/nvm.sh"
+  set -u 2>/dev/null
+fi
+
 set -Eeuo pipefail
 
 task="${1:-}"
@@ -350,6 +359,15 @@ EOF
 
   cat > "$wrapper_dir/codex-run" <<'EOF'
 #!/usr/bin/env bash
+
+# Инициализация NVM, если он установлен
+if [ -s "$HOME/.nvm/nvm.sh" ]; then
+  export NVM_DIR="$HOME/.nvm"
+  set +u 2>/dev/null
+  . "$NVM_DIR/nvm.sh"
+  set -u 2>/dev/null
+fi
+
 set -Eeuo pipefail
 
 task="${1:-}"
