@@ -178,7 +178,7 @@ class TelegramClient:
 
     def send_message(self, chat_id: int, text: str) -> None:
         if not text:
-            text = "Empty response."
+            text = "📭 Пустой ответ."
         for idx in range(0, len(text), TELEGRAM_MESSAGE_LIMIT):
             chunk = text[idx : idx + TELEGRAM_MESSAGE_LIMIT]
             self.call(
@@ -192,7 +192,7 @@ class TelegramClient:
 
     def send_document(self, chat_id: int, path: Path, caption: str = "") -> None:
         if not path.exists():
-            self.send_message(chat_id, f"File does not exist: {path}")
+            self.send_message(chat_id, f"❌ Файл не найден: {path}")
             return
         with path.open("rb") as fh:
             self.call(
@@ -349,7 +349,7 @@ class JobRunner:
                 chat_id = int(row["chat_id"]) if row else 0
                 self.storage.update_job(job_id, status="failed", finished_at=utc_now(), error=str(exc))
                 if chat_id:
-                    self.tg.send_message(chat_id, f"Job #{job_id} failed before completion:\n{exc}")
+                    self.tg.send_message(chat_id, f"💥 Задача #{job_id} завершилась с критической ошибкой:\n\n`{exc}`")
             finally:
                 self.jobs.task_done()
 
@@ -448,7 +448,10 @@ class JobRunner:
         self.storage.update_job(job_id, status="running", started_at=utc_now())
         self.tg.send_message(
             chat_id,
-            f"Job #{job_id} started: {mode}\nProject: {self.cfg.project_dir}\nCommand: {display_command}",
+            f"🚀 **Задача #{job_id} запущена**\n"
+            f"📂 Режим: `{mode}`\n"
+            f"🏗 Проект: `{self.cfg.project_dir}`\n"
+            f"💻 Команда: `{display_command}`",
         )
 
         started_ts = time.time()
@@ -560,16 +563,20 @@ class JobRunner:
         output_file: Optional[Path],
         log_file: Path,
     ) -> None:
-        header = f"Job #{job_id} finished: {status}\nreturn_code: {return_code}"
+        status_icon = "✅" if status == "success" else "❌" if status == "failed" else "🚫"
+        status_text = "Успешно" if status == "success" else "Ошибка" if status == "failed" else "Отменено"
+        
+        header = f"{status_icon} **Задача #{job_id} завершена**\nСтатус: {status_text}\nКод возврата: `{return_code}`"
+        
         if output_file and output_file.exists():
             result = read_text_limited(output_file, max_chars=12_000)
-            self.tg.send_message(chat_id, f"{header}\n\n{result}")
-            self.tg.send_document(chat_id, output_file, caption=f"Job #{job_id} result")
+            self.tg.send_message(chat_id, f"{header}\n\n📝 **Результат:**\n\n{result}")
+            self.tg.send_document(chat_id, output_file, caption=f"📄 Результат задачи #{job_id}")
             return
 
         log_tail = read_text_limited(log_file, max_chars=12_000)
-        self.tg.send_message(chat_id, f"{header}\n\nNo output markdown found. Log tail:\n\n{log_tail}")
-        self.tg.send_document(chat_id, log_file, caption=f"Job #{job_id} log")
+        self.tg.send_message(chat_id, f"{header}\n\n⚠️ Файл результата не найден. Последние строки лога:\n\n{log_tail}")
+        self.tg.send_document(chat_id, log_file, caption=f"📜 Лог задачи #{job_id}")
 
 
 class BotApp:
@@ -618,13 +625,13 @@ class BotApp:
         user_id = int(user.get("id"))
 
         if not self.is_allowed(user_id):
-            self.tg.send_message(chat_id, "Access denied.")
+            self.tg.send_message(chat_id, "⛔️ **Доступ запрещен.** Ваш ID не в белом списке.")
             return
 
         try:
             self.handle_text(chat_id, user_id, text)
         except Exception as exc:  # noqa: BLE001 - report command errors to chat
-            self.tg.send_message(chat_id, f"Error:\n{exc}")
+            self.tg.send_message(chat_id, f"⚠️ **Ошибка выполнения команды:**\n\n`{exc}`")
 
     @staticmethod
     def parse_command(text: str) -> tuple[str, str]:
@@ -662,45 +669,49 @@ class BotApp:
     def cmd_help(self, chat_id: int) -> None:
         self.tg.send_message(
             chat_id,
-            "Codex Telegram Bot\n\n"
-            "Commands:\n"
-            "/plan <task> — run codex-plan, read-only analysis\n"
-            "/run <task> — run codex-run, implementation mode\n"
-            "/gemini <task> — run Gemini CLI in YOLO mode\n"
-            "/codex <task> — run Codex CLI without approvals/sandbox\n"
-            "/status — show active job\n"
-            "/jobs — show recent jobs\n"
-            "/last — resend last finished result\n"
-            "/cancel — stop current job\n\n"
-            "Plain text without a command is treated as /plan. "
-            "Only one active job is allowed.",
+            "🤖 **Codex Telegram Bot** — Ваш AI-ассистент для работы с кодом.\n\n"
+            "**Команды:**\n"
+            "🔍 /plan <задача> — Анализ и планирование (только чтение)\n"
+            "🛠 /run <задача> — Выполнение и модификация кода (YOLO)\n"
+            "♊️ /gemini <задача> — Запуск Gemini CLI (YOLO)\n"
+            "💻 /codex <задача> — Запуск Codex CLI (без песочницы)\n\n"
+            "📊 **Статус:**\n"
+            "🕒 /status — Состояние текущей задачи\n"
+            "📜 /jobs — Последние 10 задач\n"
+            "🔄 /last — Переотправить последний результат\n"
+            "🛑 /cancel — Остановить выполнение задачи\n\n"
+            "💡 _Текст без команды автоматически запускает_ `/plan`.\n"
+            "⚠️ _Одновременно может выполняться только одна задача._",
         )
 
     def cmd_job(self, chat_id: int, user_id: int, mode: str, argument: str) -> None:
         if not argument:
-            self.tg.send_message(chat_id, f"Usage: /{mode} <task>")
+            self.tg.send_message(chat_id, f"📝 Пожалуйста, укажите описание задачи.\nИспользование: `/{mode} <текст задачи>`")
             return
-        job_id = self.runner.enqueue(mode, argument, user_id, chat_id)
-        self.tg.send_message(chat_id, f"Job #{job_id} queued: {mode}")
+        try:
+            job_id = self.runner.enqueue(mode, argument, user_id, chat_id)
+            self.tg.send_message(chat_id, f"📥 **Задача #{job_id} добавлена в очередь** (режим: {mode})")
+        except RuntimeError as exc:
+            self.tg.send_message(chat_id, f"⏳ **Очередь занята:** {exc}")
 
     def cmd_status(self, chat_id: int) -> None:
         row = self.storage.active_job()
         if not row:
-            self.tg.send_message(chat_id, "No active jobs.")
+            self.tg.send_message(chat_id, "💤 Сейчас нет активных задач.")
             return
-        self.tg.send_message(chat_id, self.format_job(row, include_task=True))
+        self.tg.send_message(chat_id, "🔎 **Текущая задача:**\n\n" + self.format_job(row, include_task=True))
 
     def cmd_jobs(self, chat_id: int) -> None:
         rows = self.storage.last_jobs(limit=10)
         if not rows:
-            self.tg.send_message(chat_id, "No jobs yet.")
+            self.tg.send_message(chat_id, "📭 История задач пуста.")
             return
-        self.tg.send_message(chat_id, "\n\n".join(self.format_job(row, include_task=False) for row in rows))
+        self.tg.send_message(chat_id, "📜 **Последние задачи:**\n\n" + "\n\n" + "\n\n".join(self.format_job(row, include_task=False) for row in rows))
 
     def cmd_last(self, chat_id: int) -> None:
         row = self.storage.last_finished_job()
         if not row:
-            self.tg.send_message(chat_id, "No finished jobs yet.")
+            self.tg.send_message(chat_id, "🤷‍♂️ Еще нет завершенных задач.")
             return
 
         output_file = row["output_file"]
@@ -708,38 +719,50 @@ class BotApp:
 
         if output_file and Path(output_file).exists():
             path = Path(output_file)
-            self.tg.send_message(chat_id, read_text_limited(path, max_chars=12_000))
-            self.tg.send_document(chat_id, path, caption=f"Last result: job #{row['id']}")
+            self.tg.send_message(chat_id, f"🔄 **Результат задачи #{row['id']}:**\n\n" + read_text_limited(path, max_chars=12_000))
+            self.tg.send_document(chat_id, path, caption=f"📄 Результат задачи #{row['id']}")
             return
 
         if log_file and Path(log_file).exists():
             path = Path(log_file)
-            self.tg.send_message(chat_id, read_text_limited(path, max_chars=12_000))
-            self.tg.send_document(chat_id, path, caption=f"Last log: job #{row['id']}")
+            self.tg.send_message(chat_id, f"🔄 **Лог задачи #{row['id']}:**\n\n" + read_text_limited(path, max_chars=12_000))
+            self.tg.send_document(chat_id, path, caption=f"📜 Лог задачи #{row['id']}")
             return
 
-        self.tg.send_message(chat_id, "Last finished job has no output file or log file.")
+        self.tg.send_message(chat_id, f"❌ Файлы для задачи #{row['id']} не найдены.")
 
     def cmd_cancel(self, chat_id: int) -> None:
         if self.runner.request_cancel():
-            self.tg.send_message(chat_id, "Cancel requested for current job.")
+            self.tg.send_message(chat_id, "🛑 **Запрос на отмену отправлен.** Прерываю процесс...")
         else:
-            self.tg.send_message(chat_id, "No running job to cancel.")
+            self.tg.send_message(chat_id, "🤷‍♂️ Нет активных задач для отмены.")
 
     @staticmethod
     def format_job(row: sqlite3.Row, include_task: bool) -> str:
         task = str(row["task"])
-        if len(task) > 700:
-            task = task[:700] + "..."
+        if len(task) > 500:
+            task = task[:500] + "..."
+            
+        status_map = {
+            "queued": "⏳ В очереди",
+            "running": "⚙️ Выполняется",
+            "success": "✅ Завершено",
+            "failed": "❌ Ошибка",
+            "cancelled": "🚫 Отменено"
+        }
+        status_display = status_map.get(row["status"], row["status"])
+        
         text = (
-            f"#{row['id']} [{row['mode']}] {row['status']}\n"
-            f"created: {row['created_at']}\n"
-            f"started: {row['started_at'] or '-'}\n"
-            f"finished: {row['finished_at'] or '-'}\n"
-            f"rc: {row['return_code'] if row['return_code'] is not None else '-'}"
+            f"🆔 **Задача #{row['id']}**\n"
+            f"🏷 Режим: `{row['mode']}`\n"
+            f"📊 Статус: {status_display}\n"
+            f"📅 Создана: `{row['created_at']}`\n"
+            f"🚀 Старт: `{row['started_at'] or '-'}`\n"
+            f"🏁 Конец: `{row['finished_at'] or '-'}`\n"
+            f"🔢 Код: `{row['return_code'] if row['return_code'] is not None else '-'}`"
         )
         if include_task:
-            text += f"\n\nTask:\n{task}"
+            text += f"\n\n📝 **Задание:**\n_{task}_"
         return text
 
 
