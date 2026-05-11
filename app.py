@@ -344,8 +344,9 @@ class JobRunner:
         self.worker.start()
 
     def enqueue(self, mode: str, task: str, user_id: int, chat_id: int) -> int:
-        if mode not in {"plan", "run", "gemini", "codex", "issue"}:
-            raise ValueError("mode must be one of: plan, run, gemini, codex, issue")
+        if mode not in {"plan", "run", "gemini", "codex", "issue", "stats"}:
+            raise ValueError("mode must be one of: plan, run, gemini, codex, issue, stats")
+
         if self.storage.active_job() is not None:
             raise RuntimeError("There is already an active job. Use /status or /cancel.")
         log_file = self.cfg.logs_dir / f"{mode}-{int(time.time())}.log"
@@ -459,6 +460,20 @@ class JobRunner:
                 "--output-format",
                 "text",
             ]
+        if mode == "stats":
+            # Собираем детальную статистику по лимитам
+            gemini_bin = self.resolve_executable(self.cfg.gemini_cmd)
+            codex_bin = self.resolve_executable(self.cfg.codex_cmd)
+            
+            # Скрипт запрашивает статус у обоих CLI
+            # Для Gemini используем скрытую команду /stats через prompt
+            script = (
+                f"echo '♊️ **Gemini Quota & Usage:**'; "
+                f"{shlex.quote(gemini_bin)} --prompt '/stats model' --output-format json 2>&1 || echo '❌ Не удалось получить JSON от Gemini'; "
+                f"echo; echo '💻 **Codex Status:**'; "
+                f"{shlex.quote(codex_bin)} status 2>&1 || echo '❌ Не удалось получить статус Codex'"
+            )
+            return ["bash", "-c", script]
         raise RuntimeError(f"Unsupported mode: {mode}")
 
     def find_output_file(self, mode: str, log_file: Path, started_ts: float) -> Optional[Path]:
@@ -588,7 +603,7 @@ class JobRunner:
                 )
             )
 
-        if mode in {"gemini"} and output_chunks:
+        if mode in {"gemini", "stats", "issue"} and output_chunks:
             output_file.write_bytes(b"".join(output_chunks))
         if not output_file.exists():
             output_file = self.find_output_file(mode, log_file, started_ts)
@@ -617,6 +632,18 @@ class JobRunner:
 
         if mode == "issue" and status == "success" and output_file and output_file.exists():
             self.handle_issue_report(chat_id, job_id, output_file)
+            return
+
+        if mode == "stats":
+            log_text = read_text_limited(log_file, max_chars=12_000)
+            # Убираем системные маркеры из лога для чистого вывода
+            clean_output = []
+            for line in log_text.splitlines():
+                if line.startswith("=== job #") or line.startswith("mode=") or line.startswith("project_dir=") or line.startswith("command="):
+                    continue
+                clean_output.append(line)
+            
+            self.tg.send_message(chat_id, "📈 **Статистика использования**\n\n" + "\n".join(clean_output).strip())
             return
 
         status_icon = "✅" if status == "success" else "❌" if status == "failed" else "🚫"
@@ -672,7 +699,7 @@ class JobRunner:
         try:
             # Мы ставим задачу в очередь бота как новый Job режима 'codex' (чтобы были видны логи и процесс)
             # Но для пользователя это выглядит как продолжение
-            new_job_id = self.runner.enqueue("codex", prompt, 0, chat_id) # 0 as system/bot user id
+            new_job_id = self.enqueue("codex", prompt, 0, chat_id) # 0 as system/bot user id
             self.tg.send_message(chat_id, f"⚙️ **Запущено создание Issue (MCP)...** (Задача #{new_job_id})")
         except Exception as exc:
             self.tg.send_message(chat_id, f"💥 Не удалось запустить процесс создания: {exc}")
@@ -748,7 +775,7 @@ class BotApp:
         if data.startswith("issue_confirm:"):
             job_id = int(data.split(":")[1])
             self.tg.answer_callback_query(query["id"], "Создаю Issue...")
-            self.create_gitlab_issue(chat_id, job_id)
+            self.runner.create_gitlab_issue(chat_id, job_id)
         elif data.startswith("issue_cancel:"):
             self.tg.answer_callback_query(query["id"], "Отменено")
             self.tg.send_message(chat_id, "🚫 Создание Issue отменено.")
@@ -776,12 +803,16 @@ class BotApp:
             self.cmd_job(chat_id, user_id, "codex", argument)
         elif command == "/issue":
             self.cmd_job(chat_id, user_id, "issue", argument)
+        elif command == "/stats":
+            self.cmd_job(chat_id, user_id, "stats", argument or "model")
         elif command == "/status":
             self.cmd_status(chat_id)
         elif command == "/jobs":
             self.cmd_jobs(chat_id)
         elif command == "/last":
             self.cmd_last(chat_id)
+        elif command == "/stats":
+            self.cmd_stats(chat_id, user_id)
         elif command == "/cancel":
             self.cmd_cancel(chat_id)
         else:
@@ -797,15 +828,21 @@ class BotApp:
             "🛠 /run <задача> — Выполнение и модификация кода (YOLO)\n"
             "♊️ /gemini <задача> — Запуск Gemini CLI (YOLO)\n"
             "💻 /codex <задача> — Запуск Codex CLI (без песочницы)\n"
-            "🎫 /issue <задание> — Создать Issue в GitLab (с подтверждением)\n\n"
+            "🎫 /issue <задание> — Создать Issue в GitLab (с подтверждением)\n"
+            "📊 /stats [model] — Просмотр лимитов и статистики моделей\n\n"
             "📊 **Статус:**\n"
             "🕒 /status — Состояние текущей задачи\n"
             "📜 /jobs — Последние 10 задач\n"
+            "📈 /stats — Лимиты и статистика использования\n"
             "🔄 /last — Переотправить последний результат\n"
             "🛑 /cancel — Остановить выполнение задачи\n\n"
             "💡 _Текст без команды автоматически запускает_ `/plan`.\n"
             "⚠️ _Одновременно может выполняться только одна задача._",
         )
+
+    def cmd_stats(self, chat_id: int, user_id: int) -> None:
+        job_id = self.runner.enqueue("stats", "Fetch usage statistics and quotas", user_id, chat_id)
+        self.tg.send_message(chat_id, f"📊 **Задача #{job_id} на получение статистики добавлена в очередь**")
 
     def cmd_job(self, chat_id: int, user_id: int, mode: str, argument: str) -> None:
         if not argument:
